@@ -1,0 +1,27 @@
+{
+  "app": "python -m infrastructure.app",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/*.pyc",
+      "**/__pycache__",
+      "tests",
+      "demo",
+      "blog",
+      "docs",
+      "agent"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:newStyleStackSynthesis": false,
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "@aws-cdk/aws-cloudwatch:enableUserMetricSettings": true,
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/customresources:installLatestAwsSdkDefault": false
+  }
+}

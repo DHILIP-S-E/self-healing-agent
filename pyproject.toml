@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "self-healing-agent"
+version = "0.1.0"
+description = "Self-healing document processing agent on AWS Bedrock AgentCore — survives crashes, resumes from last checkpoint."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "DHILIP S E", email = "dpdhilip07@gmail.com" }
+]
+keywords = ["aws", "bedrock", "agentcore", "strands", "ai-agent", "self-healing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/DHILIP-S-E/self-healing-agent"
+Issues  = "https://github.com/DHILIP-S-E/self-healing-agent/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*", "infrastructure*"]
+exclude = ["tests*", "demo*", "docs*", "blog*"]
+
+# -----------------------------------------------------------------------------
+# Pytest
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+]
+markers = [
+    "integration: tests that touch real AWS or simulate full crash/resume",
+    "slow: tests that take >5s",
+]
+
+# -----------------------------------------------------------------------------
+# Ruff (optional linter — run with `ruff check .`)
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]  # long lines OK in docstrings/test data

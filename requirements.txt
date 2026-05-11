@@ -1,0 +1,39 @@
+# =============================================================================
+# Self-Healing Agent — Python dependencies
+# Target: Python 3.12, Region: ap-south-1 (Mumbai)
+# Last verified: May 2026
+# =============================================================================
+
+# --- AWS core SDKs ---
+boto3>=1.40.0
+botocore>=1.40.0
+
+# --- Bedrock AgentCore SDK ---
+# Source: https://pypi.org/project/bedrock-agentcore/
+# Provides BedrockAgentCoreApp, MemoryClient, @app.entrypoint
+bedrock-agentcore>=0.1.0
+
+# Source: https://pypi.org/project/bedrock-agentcore-starter-toolkit/
+# CLI: `agentcore configure` / `agentcore launch` / `agentcore invoke`
+bedrock-agentcore-starter-toolkit>=0.1.0
+
+# --- Agent framework ---
+# Source: https://pypi.org/project/strands-agents/
+# Provides Agent, @tool, BedrockModel
+strands-agents>=0.1.0
+
+# --- PDF text extraction (for arXiv documents) ---
+pypdf>=4.0.0
+
+# --- Infrastructure as Code ---
+aws-cdk-lib>=2.150.0
+constructs>=10.0.0,<11.0.0
+
+# --- Testing ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+moto>=5.0.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+requests>=2.31.0
