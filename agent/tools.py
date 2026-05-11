@@ -395,3 +395,256 @@ def record_error(task_id: str, doc_key: str, error_message: str) -> dict[str, An
 
     logger.warning("record_error: task=%s skipped %s — %s", task_id, doc_key, error_message)
     return {"recorded": True, "total_errors": len(errors), "doc_key": doc_key}
+
+
+# =============================================================================
+# Intelligent extraction tools — LLM picks which ones to call per document
+# =============================================================================
+#
+# These tools let the reasoning agent CHOOSE its extraction strategy based
+# on document type.  A research paper gets abstract+methods+results; a survey
+# gets abstract+contributions; an unknown doc falls back to full_text.
+#
+# An in-memory cache avoids re-downloading the same PDF for every tool call.
+# =============================================================================
+
+_pdf_cache: dict[str, str] = {}   # "bucket/key" → full plain text
+_PDF_CACHE_MAX = 5                 # evict oldest when full
+
+
+def _cached_pdf_text(bucket: str, key: str) -> str:
+    """Download a PDF from S3 once and cache the plain text in memory."""
+    cache_key = f"{bucket}/{key}"
+    if cache_key in _pdf_cache:
+        return _pdf_cache[cache_key]
+
+    # Evict oldest entry when cache is full
+    if len(_pdf_cache) >= _PDF_CACHE_MAX:
+        oldest = next(iter(_pdf_cache))
+        del _pdf_cache[oldest]
+
+    try:
+        head = _s3.head_object(Bucket=bucket, Key=key)
+        size = int(head.get("ContentLength", 0))
+        if size > MAX_PDF_BYTES:
+            raise RuntimeError(f"{key} is {size} bytes, exceeds limit {MAX_PDF_BYTES}")
+        resp = _s3.get_object(Bucket=bucket, Key=key)
+        pdf_bytes = resp["Body"].read()
+    except ClientError as e:
+        raise RuntimeError(f"_cached_pdf_text: S3 error for {key}: {e}") from e
+
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+    except Exception as e:
+        raise RuntimeError(f"_cached_pdf_text: PDF parse error for {key}: {e}") from e
+
+    text = "\n\n".join(pages).strip()
+    _pdf_cache[cache_key] = text
+    logger.debug("_cached_pdf_text: cached %s (%d chars, %d pages)", key, len(text), len(pages))
+    return text
+
+
+import re as _re   # noqa: E402  (module-level re import used by extraction tools)
+
+
+def _extract_section(text: str, header_patterns: list[str], stop_patterns: list[str],
+                     max_chars: int = 3000) -> str:
+    """Generic section extractor using regex header/stop patterns."""
+    header_re = "|".join(header_patterns)
+    stop_re   = "|".join(stop_patterns)
+
+    m = _re.search(
+        rf"(?im)(?:^|\n)\s*(?:\d+\.?\s*)?(?:{header_re})\s*\n(.+?)(?=\n\s*(?:\d+\.?\s*)?(?:{stop_re})|\Z)",
+        text,
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
+    if m:
+        section = m.group(1).strip()
+        if len(section) >= 80:
+            return section[:max_chars]
+    return ""
+
+
+@tool
+def get_first_page(bucket: str, key: str) -> str:
+    """Return the first page of a PDF — used to CLASSIFY the document type.
+
+    Call this FIRST for every document.  Read the result and decide:
+      - Does it have 'Abstract', 'Introduction', 'Methods'? → research_paper
+      - Does it say 'survey', 'review', 'overview'?         → survey_paper
+      - Unclear structure?                                   → other
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Text of the first page (up to 2 000 chars).
+    """
+    text = _cached_pdf_text(bucket, key)
+    # First "page" in the pypdf split is separated by double newlines
+    first = text[:3000].split("\n\n")[0]
+    result = first[:2000].strip()
+    logger.info("get_first_page: %s → %d chars", key, len(result))
+    return result
+
+
+@tool
+def extract_abstract(bucket: str, key: str) -> str:
+    """Extract the Abstract section from an academic PDF.
+
+    Use this for research papers and survey papers — the abstract is the
+    single most information-dense section.  Returns "" if not found.
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Abstract text (up to 2 000 chars), or "" if no abstract found.
+    """
+    text = _cached_pdf_text(bucket, key)
+
+    # Try explicit Abstract header first
+    result = _extract_section(
+        text[:6000],
+        header_patterns=[r"abstract"],
+        stop_patterns=[r"introduction", r"keywords?", r"1[\.\s]", r"index terms"],
+        max_chars=2000,
+    )
+    if result:
+        logger.info("extract_abstract: %s → %d chars", key, len(result))
+        return result
+
+    # Fallback: grab first 800 chars (many PDFs start with abstract inline)
+    snippet = text[:800].strip()
+    if len(snippet) > 150:
+        logger.info("extract_abstract: %s → first-page fallback %d chars", key, len(snippet))
+        return snippet
+
+    logger.info("extract_abstract: %s → not found", key)
+    return ""
+
+
+@tool
+def extract_methods(bucket: str, key: str) -> str:
+    """Extract the Methods / Methodology / Approach section from an academic PDF.
+
+    Use this for research papers where the technical approach matters.
+    Returns "" if no methods section is found — caller should handle gracefully.
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Methods section text (up to 3 000 chars), or "".
+    """
+    text = _cached_pdf_text(bucket, key)
+    result = _extract_section(
+        text,
+        header_patterns=[r"method(?:ology|s)?", r"approach", r"proposed method",
+                         r"our (?:approach|method|framework)", r"framework"],
+        stop_patterns=[r"experiment", r"result", r"evaluation", r"conclusion",
+                       r"related work", r"discussion"],
+        max_chars=3000,
+    )
+    if result:
+        logger.info("extract_methods: %s → %d chars", key, len(result))
+    else:
+        logger.info("extract_methods: %s → not found", key)
+    return result
+
+
+@tool
+def extract_results(bucket: str, key: str) -> str:
+    """Extract the Results / Experiments / Evaluation section from an academic PDF.
+
+    Use this for research papers to capture key findings and metrics.
+    Returns "" if not found — caller should decide whether to skip or fallback.
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Results section text (up to 3 000 chars), or "".
+    """
+    text = _cached_pdf_text(bucket, key)
+    result = _extract_section(
+        text,
+        header_patterns=[r"results?", r"experiments?", r"evaluation",
+                         r"findings?", r"performance", r"empirical"],
+        stop_patterns=[r"discussion", r"conclusion", r"related work",
+                       r"future work", r"limitations?"],
+        max_chars=3000,
+    )
+    if result:
+        logger.info("extract_results: %s → %d chars", key, len(result))
+    else:
+        logger.info("extract_results: %s → not found", key)
+    return result
+
+
+@tool
+def extract_contributions(bucket: str, key: str) -> str:
+    """Extract the key contributions list from an academic PDF.
+
+    Use this for survey papers or papers that explicitly bullet their
+    contributions.  Returns "" if not found.
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Contributions text (up to 2 000 chars), or "".
+    """
+    text = _cached_pdf_text(bucket, key)
+
+    # Look for an explicit "contributions" heading
+    result = _extract_section(
+        text[:8000],
+        header_patterns=[r"contributions?", r"our contributions?"],
+        stop_patterns=[r"related work", r"background", r"method", r"experiment",
+                       r"conclusion", r"\d+[\.\s]"],
+        max_chars=2000,
+    )
+    if result:
+        logger.info("extract_contributions: %s → %d chars (heading)", key, len(result))
+        return result
+
+    # Fallback: look for "In this paper/work, we ..." sentences
+    m = _re.search(
+        r"(?i)in this (?:paper|work|article)[,\s]+we (.{100,600}?)(?:\.\s[A-Z]|\n\n|\Z)",
+        text[:5000],
+        flags=_re.DOTALL,
+    )
+    if m:
+        snippet = ("In this paper, we " + m.group(1)).strip()
+        logger.info("extract_contributions: %s → inline fallback %d chars", key, len(snippet))
+        return snippet[:2000]
+
+    logger.info("extract_contributions: %s → not found", key)
+    return ""
+
+
+@tool
+def extract_full_text(bucket: str, key: str) -> str:
+    """Return the full extracted text of a PDF, truncated to the processing limit.
+
+    Use this as a FALLBACK when targeted extraction tools all return empty
+    results, or when the document has no standard academic structure.
+
+    Args:
+        bucket: S3 bucket containing the PDF.
+        key:    S3 object key.
+
+    Returns:
+        Full document text truncated to MAX_TEXT_CHARS_FOR_SUMMARY.
+    """
+    text = _cached_pdf_text(bucket, key)
+    truncated = text[:MAX_TEXT_CHARS_FOR_SUMMARY]
+    logger.info("extract_full_text: %s → %d chars (of %d)", key, len(truncated), len(text))
+    return truncated
